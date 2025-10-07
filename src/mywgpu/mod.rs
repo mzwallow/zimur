@@ -1,9 +1,11 @@
 mod camera;
+mod instance;
 mod texture;
 mod vertex;
 
 use std::sync::Arc;
 
+use cgmath::prelude::*;
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -13,7 +15,11 @@ use winit::{
     window::Window,
 };
 
-use crate::mywgpu::{camera::*, vertex::Vertex};
+use crate::mywgpu::{
+    camera::*,
+    instance::{Instance, InstanceRaw},
+    vertex::Vertex,
+};
 
 const VERTICES: &[Vertex] = &[
     Vertex {
@@ -37,8 +43,13 @@ const VERTICES: &[Vertex] = &[
         tex_coords: [0.9414737, 0.2652641],
     }, // E
 ];
-
 const INDICES: &[u16] = &[0, 1, 4, 1, 2, 4, 2, 3, 4];
+const NUM_INSTANCES_PER_ROW: u32 = 10;
+const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
+    0.0,
+    NUM_INSTANCES_PER_ROW as f32 * 0.5,
+);
 
 pub struct State {
     surface: wgpu::Surface<'static>,
@@ -59,6 +70,8 @@ pub struct State {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     window: Arc<Window>,
+    instances: Vec<Instance>,
+    instance_buffer: wgpu::Buffer,
 }
 
 impl State {
@@ -195,7 +208,7 @@ impl State {
                 // Specify entry point.
                 entry_point: Some("vs_main"),
                 // Tell wgpu what type of vertices we want to pass to the vertex shader.
-                buffers: &[Vertex::desc()],
+                buffers: &[Vertex::desc(), InstanceRaw::desc()],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             // Optional. Needed when want to store color to the surface.
@@ -289,6 +302,37 @@ impl State {
             label: Some("camera_bind_group"),
         });
 
+        let instances = (0..NUM_INSTANCES_PER_ROW)
+            .flat_map(|z| {
+                (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                    let position = cgmath::Vector3 {
+                        x: x as f32,
+                        y: 0.0,
+                        z: z as f32,
+                    } - INSTANCE_DISPLACEMENT;
+
+                    let rotation = if position.is_zero() {
+                        // this is needed so an object at (0, 0, 0) won't get scaled to zero
+                        // as Quaternions can affect scale if they're not created correctly
+                        cgmath::Quaternion::from_axis_angle(
+                            cgmath::Vector3::unit_z(),
+                            cgmath::Deg(0.0),
+                        )
+                    } else {
+                        cgmath::Quaternion::from_axis_angle(position.normalize(), cgmath::Deg(45.0))
+                    };
+
+                    Instance { position, rotation }
+                })
+            })
+            .collect::<Vec<_>>();
+        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Instance Buffer"),
+            contents: bytemuck::cast_slice(&instance_data),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         Ok(Self {
             surface,
             device,
@@ -308,6 +352,8 @@ impl State {
             camera_buffer,
             camera_bind_group,
             window,
+            instances,
+            instance_buffer,
         })
     }
 
@@ -329,7 +375,7 @@ impl State {
     }
 
     pub fn handle_mouse_moved(&mut self, x: f64, y: f64) {
-        println!("mouse(x,y): ({},{})", x, y,);
+        print!("\rmouse(x,y): ({:.4}, {:.4})", x, y,);
     }
 
     pub fn update(&mut self) {
@@ -384,9 +430,10 @@ impl State {
             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
         }
 
         // submit will accept anything that implements IntoIter.
