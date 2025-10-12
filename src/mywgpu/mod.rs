@@ -18,6 +18,7 @@ use winit::{
 use crate::mywgpu::{
     camera::*,
     instance::{Instance, InstanceRaw},
+    texture::Texture,
     vertex::Vertex,
 };
 
@@ -62,16 +63,18 @@ pub struct State {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
-    diffuse_bind_group: wgpu::BindGroup,
+    #[allow(dead_code)]
     diffuse_texture: texture::Texture,
+    diffuse_bind_group: wgpu::BindGroup,
     camera: Camera,
     camera_controller: CameraController,
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
-    window: Arc<Window>,
     instances: Vec<Instance>,
     instance_buffer: wgpu::Buffer,
+    depth_texture: Texture,
+    window: Arc<Window>,
 }
 
 impl State {
@@ -134,7 +137,7 @@ impl State {
 
         let diffuse_bytes = include_bytes!("./happy-tree.png");
         let diffuse_texture =
-            texture::Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
+            Texture::from_bytes(&device, &queue, diffuse_bytes, "happy-tree.png").unwrap();
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -244,7 +247,13 @@ impl State {
                 // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,                         // How many samples the pipeline will use
                 mask: !0,                         // Which samples should be active
@@ -282,7 +291,7 @@ impl State {
             znear: 0.1,
             zfar: 100.0,
         };
-        let camera_controller = CameraController::new(0.2);
+        let camera_controller = CameraController::new(0.1);
 
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(&camera);
@@ -333,6 +342,8 @@ impl State {
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        let depth_texture = Texture::create_depth_texture(&device, &config, "depth_texture");
+
         Ok(Self {
             surface,
             device,
@@ -351,9 +362,10 @@ impl State {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
-            window,
             instances,
             instance_buffer,
+            depth_texture,
+            window,
         })
     }
 
@@ -363,6 +375,8 @@ impl State {
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
             self.is_sureface_configured = true;
+            self.depth_texture =
+                Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
         }
     }
 
@@ -421,7 +435,15 @@ impl State {
                         depth_slice: None, // TODO:
                     }),
                 ],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
